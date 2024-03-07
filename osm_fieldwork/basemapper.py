@@ -29,6 +29,7 @@ import threading
 from pathlib import Path
 from typing import Union
 
+from io import BytesIO
 import geojson
 import mercantile
 from cpuinfo import get_cpu_info
@@ -125,7 +126,8 @@ class BaseMapper(object):
 
     def __init__(
         self,
-        boundary: str,
+        # indicates that a parameter or variable can accept values of either type str or type BytesIO.
+        boundary: Union[str, BytesIO],
         base: str,
         source: str,
         xy: bool,
@@ -272,7 +274,7 @@ class BaseMapper(object):
 
     def makeBbox(
         self,
-        boundary: str,
+        boundary: Union[str, BytesIO],
     ) -> tuple[float, float, float, float]:
         """Make a bounding box from a shapely geometry.
 
@@ -283,52 +285,61 @@ class BaseMapper(object):
         Returns:
             (list): The bounding box coordinates
         """
-        if not boundary.lower().endswith((".json", ".geojson")):
-            # Is BBOX string
-            try:
-                if "," in boundary:
-                    bbox_parts = boundary.split(",")
-                else:
-                    bbox_parts = boundary.split(" ")
-                bbox = tuple(float(x) for x in bbox_parts)
-                if len(bbox) == 4:
-                    # BBOX valid
-                    return bbox
-                else:
-                    msg = f"BBOX string malformed: {bbox}"
+        # Check if the boundary is a string or a BytesIO object
+        if isinstance(boundary, str):
+            if not boundary.lower().endswith((".json", ".geojson")):
+                # Is BBOX string
+                try:
+                    if "," in boundary:
+                        bbox_parts = boundary.split(",")
+                    else:
+                        bbox_parts = boundary.split(" ")
+                    bbox = tuple(float(x) for x in bbox_parts)
+                    if len(bbox) == 4:
+                        # BBOX valid
+                        return bbox
+                    else:
+                        msg = f"BBOX string malformed: {bbox}"
+                        log.error(msg)
+                        raise ValueError(msg) from None
+                except Exception as e:
+                    log.error(e)
+                    msg = f"Failed to parse BBOX string: {boundary}"
                     log.error(msg)
                     raise ValueError(msg) from None
-            except Exception as e:
-                log.error(e)
-                msg = f"Failed to parse BBOX string: {boundary}"
+        # Process as a BytesIO object        
+        elif isinstance(boundary, BytesIO):
+            # change the current position of the file to the beginning of the BytesIO object
+            boundary.seek(0)  
+            # Read the BytesIO content as a string
+            geojson_data = boundary.read().decode('utf-8')  
+            poly = geojson.loads(geojson_data)
+            if "features" in poly:
+                geometry = shape(poly["features"][0]["geometry"])
+            elif "geometry" in poly:
+                geometry = shape(poly["geometry"])
+            else:
+                geometry = shape(poly)
+
+            if isinstance(geometry, list):
+                # Multiple geometries
+                log.debug("Creating union of multiple bbox geoms")
+                geometry = unary_union(geometry)
+
+            if geometry.is_empty:
+                msg = f"No bbox extracted from {geometry}"
                 log.error(msg)
                 raise ValueError(msg) from None
 
-        log.debug(f"Reading geojson file: {boundary}")
-        with open(boundary, "r") as f:
-            poly = geojson.load(f)
-        if "features" in poly:
-            geometry = shape(poly["features"][0]["geometry"])
-        elif "geometry" in poly:
-            geometry = shape(poly["geometry"])
+            bbox = geometry.bounds
+            # left, bottom, right, top
+            # minX, minY, maxX, maxY
+            return bbox
         else:
-            geometry = shape(poly)
+            raise ValueError("Invalid boundary type. It must be either a string or a BytesIO object.")
 
-        if isinstance(geometry, list):
-            # Multiple geometries
-            log.debug("Creating union of multiple bbox geoms")
-            geometry = unary_union(geometry)
-
-        if geometry.is_empty:
-            msg = f"No bbox extracted from {geometry}"
-            log.error(msg)
-            raise ValueError(msg) from None
-
-        bbox = geometry.bounds
-        # left, bottom, right, top
-        # minX, minY, maxX, maxY
-        return bbox
-
+        # Handle the case where the boundary is not a string or BytesIO object
+        raise ValueError("Invalid boundary type. It must be either a string or a BytesIO object.")
 
 def tileid_from_y_tile(filepath: Union[Path | str]):
     """Helper function to get the tile id from a tile in z/x/y directory structure.
